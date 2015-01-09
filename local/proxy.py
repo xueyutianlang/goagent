@@ -88,6 +88,7 @@ import urllib2
 import urlparse
 import zlib
 import select
+import hmac
 
 import gevent
 import gevent.server
@@ -209,6 +210,7 @@ from proxylib import StripPluginEx
 from proxylib import URLRewriteFilter
 from proxylib import UserAgentFilter
 from proxylib import XORCipher
+from proxylib import RC4Socket
 from proxylib import forward_socket
 
 
@@ -625,9 +627,9 @@ class VPSServer(gevent.server.StreamServer):
     net2 = Net2()
 
     def __init__(self, *args, **kwargs):
-        self.fetchservers = kwargs.pop('fetchservers')
+        self.remote_addr = kwargs.pop('remote')
+        self.remote_password = kwargs.pop('password')
         gevent.server.StreamServer.__init__(self, *args, **kwargs)
-        self.remote_cache = {}
 
     def forward_socket(self, local, remote, timeout, bufsize):
         """forward socket"""
@@ -674,19 +676,12 @@ class VPSServer(gevent.server.StreamServer):
                 return
         request_line, _, header_data = request_data.partition('\r\n')
         logging.info('%s:%d "VPS %s" - -', addr[0], addr[1], request_line)
-        fetchserver = self.fetchservers[0]
-        scheme, username, password, netloc = ProxyUtil.parse_proxy(fetchserver)
-        if scheme != 'https':
-            raise ValueError('VPSServer current only support https protocol')
-        if netloc.rfind(':') <= netloc.rfind(']'):
-            # no port number
-            host = netloc
-            port = 443 if scheme == 'https' else 80
-        else:
-            host, _, port = netloc.rpartition(':')
-            port = int(port)
-        remote = self.net2.create_ssl_connection(host, port, 8, cache_key=netloc)
-        request_data = '%s\r\nProxy-Authorization: Baisic %s\r\n%s' % (request_line, base64.b64encode('%s:%s' % (username, password)).strip(), header_data)
+        host, port = self.remote_addr.rsplit(':')
+        remote = self.net2.create_tcp_connection(host.strip('[]'), int(port), 8, cache_key=self.remote_addr)
+        seed = os.urandom(4)
+        logging.info('current seed %r', seed)
+        remote.send(seed)
+        remote = RC4Socket(remote, hmac.new(self.remote_password, seed).digest())
         remote.sendall(request_data)
         try:
             self.forward_socket(sock, remote, 60, bufsize=256*1024)
@@ -1383,7 +1378,8 @@ class Common(object):
 
         self.VPS_ENABLE = self.CONFIG.getint('vps', 'enable')
         self.VPS_LISTEN = self.CONFIG.get('vps', 'listen')
-        self.VPS_FETCHSERVER = self.CONFIG.get('vps', 'fetchserver')
+        self.VPS_REMOTE = self.CONFIG.get('vps', 'remote')
+        self.VPS_PASSWORD = self.CONFIG.get('vps', 'password')
 
         self.PROXY_ENABLE = self.CONFIG.getint('proxy', 'enable')
         self.PROXY_AUTODETECT = self.CONFIG.getint('proxy', 'autodetect') if self.CONFIG.has_option('proxy', 'autodetect') else 0
@@ -1505,7 +1501,7 @@ class Common(object):
             info += 'PHP FetchServer    : %s\n' % common.PHP_FETCHSERVER
         if common.VPS_ENABLE:
             info += 'VPS Listen         : %s\n' % common.VPS_LISTEN
-            info += 'VPS FetchServer    : %s\n' % common.VPS_FETCHSERVER
+            info += 'VPS Remote         : %s\n' % common.VPS_REMOTE
         if common.DNS_ENABLE:
             info += 'DNS Listen         : %s\n' % common.DNS_LISTEN
             info += 'DNS Servers        : %s\n' % '|'.join(common.DNS_SERVERS)
@@ -1650,7 +1646,7 @@ def main():
         VPSServer.net2.enable_connection_keepalive()
         VPSServer.net2.enable_openssl_session_cache()
         VPSServer.net2.openssl_context.set_cipher_list('RC4-MD5:RC4-SHA:!aNULL:!eNULL')
-        vps_server = VPSServer((host, int(port)), backlog=1024, fetchservers=common.VPS_FETCHSERVER.split('|'))
+        vps_server = VPSServer((host, int(port)), backlog=1024, remote=common.VPS_REMOTE, password='123456')
         thread.start_new_thread(vps_server.serve_forever, tuple())
 
     if common.GAE_ENABLE:

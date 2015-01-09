@@ -22,10 +22,9 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(asctime)s %(message)s', datefmt='[%b %d %H:%M:%S]')
 
 import base64
-import socket
 import time
-import thread
-import ssl
+import BaseHTTPServer
+import hmac
 
 from proxylib import BaseFetchPlugin
 from proxylib import BaseProxyHandlerFilter
@@ -35,6 +34,7 @@ from proxylib import AdvancedNet2
 from proxylib import random_hostname
 from proxylib import forward_socket
 from proxylib import CertUtility
+from proxylib import RC4Socket
 
 
 class VPSFetchPlugin(BaseFetchPlugin):
@@ -54,52 +54,6 @@ class VPSFetchPlugin(BaseFetchPlugin):
         forward_socket(handler.connection, sock, 60, 256*1024)
 
 
-class VPSAuthFilter(BaseProxyHandlerFilter):
-    """authorization filter"""
-    auth_info = "Proxy authentication required"""
-    white_list = set(['127.0.0.1'])
-
-    def __init__(self, filename):
-        self.filename = filename
-        self.auth_info = {}
-        self.last_time_for_auth_info = 0
-        thread.start_new_thread(self._get_auth_info, tuple())
-
-    def _get_auth_info(self):
-        while True:
-            try:
-                if self.last_time_for_auth_info < os.path.getmtime(self.filename):
-                    with open(self.filename) as fp:
-                        for line in fp:
-                            line = line.strip()
-                            if line.startswith('#'):
-                                continue
-                            username, password = line.split(None, 1)
-                            self.auth_info[username] = password
-            except OSError as e:
-                logging.error('get auth_info from %r failed: %r', self.filename, e)
-            finally:
-                time.sleep(60)
-
-    def check_auth_header(self, auth_header):
-        method, _, auth_data = auth_header.partition(' ')
-        if method == 'Basic':
-            username, _, password = base64.b64decode(auth_data).partition(':')
-            if password == self.auth_info.get(username, ''):
-                return True
-        return True
-
-    def filter(self, handler):
-        if self.white_list and handler.client_address[0] in self.white_list:
-            return None
-        auth_header = handler.headers.get('Proxy-Authorization') or getattr(handler, 'auth_header', None)
-        if auth_header and self.check_auth_header(auth_header):
-            handler.auth_header = auth_header
-        else:
-            headers = {'Connection': 'close'}
-            return 'mock', {'status': 403, 'headers': headers, 'body': ''}
-
-
 class VPSProxyFilter(BaseProxyHandlerFilter):
     """vps filter"""
     def __init__(self):
@@ -117,16 +71,21 @@ class VPSProxyHandler(SimpleProxyHandler):
     """GAE Proxy Handler"""
     handler_filters = [VPSProxyFilter()]
 
+    def setup(self):
+        self.__class__.do_CONNECT = self.__class__.do_METHOD
+        self.__class__.do_GET = self.__class__.do_METHOD
+        self.__class__.do_PUT = self.__class__.do_METHOD
+        self.__class__.do_POST = self.__class__.do_METHOD
+        self.__class__.do_HEAD = self.__class__.do_METHOD
+        self.__class__.do_DELETE = self.__class__.do_METHOD
+        self.__class__.do_OPTIONS = self.__class__.do_METHOD
+        self.__class__.do_PATCH = self.__class__.do_METHOD
+        key = '123456'
+        seed = self.request.recv(4)
+        logging.info('current seed %r', seed)
+        self.request = RC4Socket(self.request, hmac.new(key, seed).digest())
+        BaseHTTPServer.BaseHTTPRequestHandler.setup(self)
 
-def getlistener(addr, family=socket.AF_INET, sslargs=None):
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    if sslargs:
-        sslargs['server_side'] = True
-        sock = ssl.SSLSocket(sock, **sslargs)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(addr)
-    sock.listen(1024)
-    return sock
 
 def main():
     global __file__
@@ -134,26 +93,11 @@ def main():
     if os.path.islink(__file__):
         __file__ = getattr(os, 'readlink', lambda x: x)(__file__)
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    keyfile = os.path.splitext(__file__)[0] + '.pem'
-    if not os.path.exists(keyfile) or time.time() - os.path.getctime(keyfile) > 3 * 24 * 60 * 60:
-        CertUtility(random_hostname(), keyfile, 'certs').dump_ca()
-    authfile = os.path.splitext(__file__)[0] + '.conf'
-    if not os.path.exists(authfile):
-        logging.info('autfile %r not exists, create it', authfile)
-        with open(authfile, 'wb') as fp:
-            username = random_hostname().split('.')[1]
-            password = '123456'
-            data = '%s %s\n' % (username, password)
-            fp.write(data)
-            logging.info('add username=%r password=%r to %r', username, password, authfile)
-        logging.info('authfile %r was created', authfile)
-    VPSProxyHandler.handler_filters.insert(0, VPSAuthFilter(authfile))
     VPSProxyHandler.handler_plugins['vps'] = VPSFetchPlugin()
     VPSProxyHandler.net2 = AdvancedNet2(window=2, ssl_version='SSLv23')
     VPSProxyHandler.net2.enable_connection_cache()
     VPSProxyHandler.net2.enable_connection_keepalive()
-    listener = getlistener(('', 443), socket.AF_INET, sslargs=dict(keyfile=keyfile, certfile=keyfile))
-    server = LocalProxyServer(listener, VPSProxyHandler)
+    server = LocalProxyServer(('', 443), VPSProxyHandler)
     server.serve_forever()
 
 if __name__ == '__main__':
