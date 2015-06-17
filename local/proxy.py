@@ -990,22 +990,25 @@ class PacUtil(object):
                     line = line[2:]
                     use_proxy = False
                 domain = ''
-                if line.startswith('/') and line.endswith('/'):
-                    line = line[1:-1]
-                    if line.startswith('^https?:\\/\\/[^\\/]+') and re.match(r'^(\w|\\\-|\\\.)+$', line[18:]):
-                        domain = line[18:].replace(r'\.', '.')
+                try:
+                    if line.startswith('/') and line.endswith('/'):
+                        line = line[1:-1]
+                        if line.startswith('^https?:\\/\\/[^\\/]+') and re.match(r'^(\w|\\\-|\\\.)+$', line[18:]):
+                            domain = line[18:].replace(r'\.', '.')
+                        else:
+                            logging.warning('unsupport gfwlist regex: %r', line)
+                    elif line.startswith('||'):
+                        domain = line[2:].lstrip('*').rstrip('/')
+                    elif line.startswith('|'):
+                        domain = urlparse.urlsplit(line[1:]).hostname.lstrip('*')
+                    elif line.startswith(('http://', 'https://')):
+                        domain = urlparse.urlsplit(line).hostname.lstrip('*')
+                    elif re.search(r'^([\w\-\_\.]+)([\*\/]|$)', line):
+                        domain = re.split(r'[\*\/]', line)[0]
                     else:
-                        logging.warning('unsupport gfwlist regex: %r', line)
-                elif line.startswith('||'):
-                    domain = line[2:].lstrip('*').rstrip('/')
-                elif line.startswith('|'):
-                    domain = urlparse.urlsplit(line[1:]).hostname.lstrip('*')
-                elif line.startswith(('http://', 'https://')):
-                    domain = urlparse.urlsplit(line).hostname.lstrip('*')
-                elif re.search(r'^([\w\-\_\.]+)([\*\/]|$)', line):
-                    domain = re.split(r'[\*\/]', line)[0]
-                else:
-                    pass
+                        pass
+                except Exception as e:
+                    logging.warning('error when process gfwlist rule: %r %s', line, e)
                 if '*' in domain:
                     domain = domain.split('*')[-1]
                 if not domain or re.match(r'^\w+$', domain):
