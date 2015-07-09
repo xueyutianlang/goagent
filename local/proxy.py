@@ -73,6 +73,7 @@ import ConfigParser
 import errno
 import httplib
 import io
+import locale
 import Queue
 import random
 import re
@@ -448,7 +449,7 @@ class GAEFetchPlugin(BaseFetchPlugin):
             else:
                 status = 502
                 headers = {'Content-Type': 'text/html'}
-                content = message_html('502 URLFetch failed', 'Local URLFetch %r failed' % handler.path, '<br>'.join(repr(x) for x in errors))
+                content = message_html('502 URLFetch failed', 'Local URLFetch %r failed' % handler.path, '<br>'.join(str(x).decode(locale.getpreferredencoding()) for x in errors))
             return handler.handler_plugins['mock'].handle(handler, status, headers, content)
         logging.info('%s "GAE %s %s %s" %s %s', handler.address_string(), handler.command, handler.path, handler.protocol_version, response.status, response.getheader('Content-Length', '-'))
         try:
@@ -535,7 +536,7 @@ class GAEFetchPlugin(BaseFetchPlugin):
         # post data
         need_crlf = 0 if common.GAE_MODE == 'https' else 1
         need_validate = common.GAE_VALIDATE
-        cache_key = '%s:%d' % (handler.net2.host_postfix_map['.appspot.com'], 443 if common.GAE_MODE == 'https' else 80)
+        cache_key = '%s:%d' % (handler.net2.host_postfix_map.get('.appspot.com',''), 443 if common.GAE_MODE == 'https' else 80)
         headfirst = bool(common.GAE_HEADFIRST)
         response = handler.net2.create_http_request(request_method, fetchserver, request_headers, body, timeout, crlf=need_crlf, validate=need_validate, cache_key=cache_key, headfirst=headfirst)
         response.app_status = response.status
@@ -989,22 +990,25 @@ class PacUtil(object):
                     line = line[2:]
                     use_proxy = False
                 domain = ''
-                if line.startswith('/') and line.endswith('/'):
-                    line = line[1:-1]
-                    if line.startswith('^https?:\\/\\/[^\\/]+') and re.match(r'^(\w|\\\-|\\\.)+$', line[18:]):
-                        domain = line[18:].replace(r'\.', '.')
+                try:
+                    if line.startswith('/') and line.endswith('/'):
+                        line = line[1:-1]
+                        if line.startswith('^https?:\\/\\/[^\\/]+') and re.match(r'^(\w|\\\-|\\\.)+$', line[18:]):
+                            domain = line[18:].replace(r'\.', '.')
+                        else:
+                            logging.warning('unsupport gfwlist regex: %r', line)
+                    elif line.startswith('||'):
+                        domain = line[2:].lstrip('*').rstrip('/')
+                    elif line.startswith('|'):
+                        domain = urlparse.urlsplit(line[1:]).hostname.lstrip('*')
+                    elif line.startswith(('http://', 'https://')):
+                        domain = urlparse.urlsplit(line).hostname.lstrip('*')
+                    elif re.search(r'^([\w\-\_\.]+)([\*\/]|$)', line):
+                        domain = re.split(r'[\*\/]', line)[0]
                     else:
-                        logging.warning('unsupport gfwlist regex: %r', line)
-                elif line.startswith('||'):
-                    domain = line[2:].lstrip('*').rstrip('/')
-                elif line.startswith('|'):
-                    domain = urlparse.urlsplit(line[1:]).hostname.lstrip('*')
-                elif line.startswith(('http://', 'https://')):
-                    domain = urlparse.urlsplit(line).hostname.lstrip('*')
-                elif re.search(r'^([\w\-\_\.]+)([\*\/]|$)', line):
-                    domain = re.split(r'[\*\/]', line)[0]
-                else:
-                    pass
+                        pass
+                except Exception as e:
+                    logging.warning('error when process gfwlist rule: %r %s', line, e)
                 if '*' in domain:
                     domain = domain.split('*')[-1]
                 if not domain or re.match(r'^\w+$', domain):
